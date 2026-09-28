@@ -24,6 +24,16 @@ sealed class TorState {
     data class Failed(val message: String) : TorState()
 }
 
+/** One relay in the current circuit — the "onion layer" the connection passes through. */
+data class CircuitHop(
+    val role: String,
+    val nickname: String,
+    val fingerprint: String,
+    val ipAddress: String?
+)
+
+data class CircuitInfo(val circuitId: String, val hops: List<CircuitHop>)
+
 /**
  * Launches the bundled tor binary (libtor.so, from the tor-android dependency) as a child
  * process, tracks its bootstrap progress from stdout, and drives its control port for
@@ -138,7 +148,87 @@ class TorManager(private val context: Context) {
     }
 
     /** Sends SIGNAL NEWNYM over the control port, forcing new circuits for a fresh identity. */
-    suspend fun newIdentity(): Boolean = withContext(Dispatchers.IO) {
+    suspend fun newIdentity(): Boolean =
+        withControlConnection { input, out ->
+            out.write("SIGNAL NEWNYM\r\n".toByteArray())
+            out.flush()
+            input.readLine()?.startsWith("250") == true
+        } ?: false
+
+    /** Looks up the currently-built general-purpose circuit — the relay path (Guard, Middle,
+     * Exit) that new page loads are routed through — via the control port. Null if Tor isn't
+     * up yet or no circuit has been built. */
+    suspend fun getCurrentCircuit(): CircuitInfo? =
+        withControlConnection { input, out ->
+            out.write("GETINFO circuit-status\r\n".toByteArray())
+            out.flush()
+
+            val firstLine = input.readLine() ?: return@withControlConnection null
+            val circuitLines = mutableListOf<String>()
+            if (firstLine.startsWith("250+circuit-status")) {
+                while (true) {
+                    val l = input.readLine() ?: break
+                    if (l == ".") break
+                    circuitLines.add(l)
+                }
+                input.readLine() // trailing "250 OK"
+            }
+
+            val chosen = circuitLines
+                .map { it.split(" ") }
+                .filter { parts ->
+                    parts.size >= 3 && parts[1] == "BUILT" && parts.any { p -> p.startsWith("PURPOSE=GENERAL") }
+                }
+                .lastOrNull() ?: return@withControlConnection null
+
+            val circuitId = chosen[0]
+            val roles = listOf("Guard", "Middle", "Exit")
+            val hops = chosen[2].split(",").mapIndexed { index, spec ->
+                val withoutDollar = spec.removePrefix("$")
+                val fingerprint = withoutDollar.substringBefore("~")
+                val nickname = if (withoutDollar.contains("~")) withoutDollar.substringAfter("~") else ""
+                CircuitHop(
+                    role = roles.getOrElse(index) { "Hop ${index + 1}" },
+                    nickname = nickname.ifBlank { "(unknown)" },
+                    fingerprint = fingerprint,
+                    ipAddress = fetchRelayIp(input, out, fingerprint)
+                )
+            }
+
+            CircuitInfo(circuitId, hops)
+        }
+
+    /** Looks up a relay's IP from the consensus via the control port. Must be called with an
+     * already-authenticated connection (see [withControlConnection]); sends one more command
+     * on the same socket before it's closed. */
+    private fun fetchRelayIp(input: BufferedReader, out: java.io.OutputStream, fingerprint: String): String? {
+        return try {
+            out.write("GETINFO ns/id/$fingerprint\r\n".toByteArray())
+            out.flush()
+            val firstLine = input.readLine() ?: return null
+            if (!firstLine.startsWith("250+ns/id/")) return null
+
+            var ip: String? = null
+            while (true) {
+                val l = input.readLine() ?: break
+                if (l == ".") break
+                if (l.startsWith("r ")) {
+                    val parts = l.split(" ")
+                    if (parts.size >= 7) ip = parts[6]
+                }
+            }
+            input.readLine() // trailing "250 OK"
+            ip
+        } catch (t: Throwable) {
+            Log.w(TAG, "relay IP lookup failed for $fingerprint", t)
+            null
+        }
+    }
+
+    /** Opens an authenticated control-port connection, runs [block] on it, then closes it. */
+    private suspend fun <T> withControlConnection(
+        block: (BufferedReader, java.io.OutputStream) -> T?
+    ): T? = withContext(Dispatchers.IO) {
         try {
             Socket("127.0.0.1", CONTROL_PORT).use { socket ->
                 socket.soTimeout = 5000
@@ -148,20 +238,18 @@ class TorManager(private val context: Context) {
                 val cookieHex = cookieFile.readBytes().joinToString("") { "%02X".format(it) }
                 out.write("AUTHENTICATE $cookieHex\r\n".toByteArray())
                 out.flush()
-                if (input.readLine()?.startsWith("250") != true) return@withContext false
+                if (input.readLine()?.startsWith("250") != true) return@withContext null
 
-                out.write("SIGNAL NEWNYM\r\n".toByteArray())
-                out.flush()
-                val signalOk = input.readLine()?.startsWith("250") == true
+                val result = block(input, out)
 
                 out.write("QUIT\r\n".toByteArray())
                 out.flush()
 
-                signalOk
+                result
             }
         } catch (t: Throwable) {
-            Log.e(TAG, "newIdentity failed", t)
-            false
+            Log.e(TAG, "control connection failed", t)
+            null
         }
     }
 

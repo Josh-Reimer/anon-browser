@@ -31,6 +31,7 @@ import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
@@ -60,6 +61,7 @@ import androidx.compose.material.icons.filled.ArrowForward
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.Layers
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Shuffle
@@ -169,7 +171,8 @@ class MainActivity : ComponentActivity() {
                         onNewIdentity = { torService?.torManager?.newIdentity() ?: false },
                         onApplyBridgeSettings = { enabled, text ->
                             torService?.applyBridgeSettings(enabled, text)
-                        }
+                        },
+                        onFetchCircuit = { torService?.torManager?.getCurrentCircuit() }
                     )
                 }
             }
@@ -201,7 +204,8 @@ private fun BrowserScreen(
     torStateFlow: StateFlow<TorState>,
     bridgeWarningFlow: StateFlow<String?>,
     onNewIdentity: suspend () -> Boolean,
-    onApplyBridgeSettings: (enabled: Boolean, text: String) -> Unit
+    onApplyBridgeSettings: (enabled: Boolean, text: String) -> Unit,
+    onFetchCircuit: suspend () -> CircuitInfo?
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -212,6 +216,7 @@ private fun BrowserScreen(
     val clipboardManager = LocalClipboardManager.current
     val focusRequester = remember { FocusRequester() }
     var showBridgesSheet by remember { mutableStateOf(false) }
+    var showCircuitSheet by remember { mutableStateOf(false) }
 
     var proxyReady by remember { mutableStateOf(false) }
     var addressBarText by remember { mutableStateOf("") }
@@ -385,6 +390,13 @@ private fun BrowserScreen(
                     Icon(Icons.Filled.Shuffle, contentDescription = "New identity")
                 }
 
+                IconButton(
+                    onClick = { showCircuitSheet = true },
+                    enabled = torState is TorState.Running
+                ) {
+                    Icon(Icons.Filled.Layers, contentDescription = "View Tor circuit")
+                }
+
                 IconButton(onClick = { showBridgesSheet = true }) {
                     Icon(Icons.Filled.Settings, contentDescription = "Bridge settings")
                 }
@@ -462,6 +474,13 @@ private fun BrowserScreen(
                 initialText = remember { BridgePrefs.getText(context) },
                 onDismiss = { showBridgesSheet = false },
                 onSave = { enabled, text -> onApplyBridgeSettings(enabled, text) }
+            )
+        }
+
+        if (showCircuitSheet) {
+            CircuitSheet(
+                onFetch = onFetchCircuit,
+                onDismiss = { showCircuitSheet = false }
             )
         }
     }
@@ -674,6 +693,129 @@ private fun BridgesSheet(
         }
     }
 }
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun CircuitSheet(
+    onFetch: suspend () -> CircuitInfo?,
+    onDismiss: () -> Unit
+) {
+    val sheetState = rememberModalBottomSheetState()
+    val scope = rememberCoroutineScope()
+    var circuit by remember { mutableStateOf<CircuitInfo?>(null) }
+    var loading by remember { mutableStateOf(true) }
+
+    fun refresh() {
+        loading = true
+        scope.launch {
+            circuit = onFetch()
+            loading = false
+        }
+    }
+
+    LaunchedEffect(Unit) { refresh() }
+
+    ModalBottomSheet(onDismissRequest = onDismiss, sheetState = sheetState) {
+        Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 8.dp)) {
+            Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Text("Tor Circuit", style = MaterialTheme.typography.titleLarge, modifier = Modifier.weight(1f))
+                IconButton(onClick = { refresh() }) {
+                    Icon(Icons.Filled.Refresh, contentDescription = "Refresh circuit")
+                }
+            }
+            Text(
+                "Your traffic is routed through three relays, each only knowing the hop " +
+                    "before and after it — like layers of an onion.",
+                style = MaterialTheme.typography.bodySmall
+            )
+            Spacer(Modifier.height(16.dp))
+
+            val snapshot = circuit
+            when {
+                loading -> {
+                    Box(modifier = Modifier.fillMaxWidth().padding(32.dp), contentAlignment = Alignment.Center) {
+                        CircularProgressIndicator(color = TorPurple)
+                    }
+                }
+                snapshot == null -> {
+                    Text(
+                        "No active circuit yet. Load a page, then check back.",
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                }
+                else -> {
+                    Column {
+                        CircuitHopRow(label = "This device", subtitle = null, ringCount = 1, isFirst = true, isLast = false)
+                        snapshot.hops.forEachIndexed { index, hop ->
+                            CircuitHopRow(
+                                label = "${hop.role} · ${hop.nickname}",
+                                subtitle = listOfNotNull(hop.ipAddress, shortenFingerprint(hop.fingerprint))
+                                    .joinToString("  ·  "),
+                                ringCount = index + 2,
+                                isFirst = false,
+                                isLast = false
+                            )
+                        }
+                        CircuitHopRow(
+                            label = "Destination site",
+                            subtitle = "Only the exit relay knows this",
+                            ringCount = snapshot.hops.size + 2,
+                            isFirst = false,
+                            isLast = true
+                        )
+                    }
+                }
+            }
+            Spacer(Modifier.height(12.dp))
+        }
+    }
+}
+
+@Composable
+private fun CircuitHopRow(
+    label: String,
+    subtitle: String?,
+    ringCount: Int,
+    isFirst: Boolean,
+    isLast: Boolean
+) {
+    Row(modifier = Modifier.fillMaxWidth()) {
+        Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.width(44.dp)) {
+            Box(
+                modifier = Modifier.width(2.dp).height(10.dp)
+                    .background(if (isFirst) androidx.compose.ui.graphics.Color.Transparent else TorPurple.copy(alpha = 0.35f))
+            )
+            Box(contentAlignment = Alignment.Center) {
+                for (ring in 0 until ringCount.coerceIn(1, 4)) {
+                    Box(
+                        modifier = Modifier
+                            .size((34 - ring * 6).dp)
+                            .border(1.5.dp, TorPurple.copy(alpha = 0.2f + ring * 0.15f), CircleShape)
+                    )
+                }
+                Box(modifier = Modifier.size(8.dp).background(TorPurple, CircleShape))
+            }
+            Box(
+                modifier = Modifier.width(2.dp).height(10.dp)
+                    .background(if (isLast) androidx.compose.ui.graphics.Color.Transparent else TorPurple.copy(alpha = 0.35f))
+            )
+        }
+        Spacer(Modifier.width(12.dp))
+        Column(modifier = Modifier.padding(top = 6.dp, bottom = 6.dp)) {
+            Text(label, style = MaterialTheme.typography.titleSmall)
+            if (!subtitle.isNullOrBlank()) {
+                Text(
+                    subtitle,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        }
+    }
+}
+
+private fun shortenFingerprint(fp: String): String =
+    if (fp.length > 12) "${fp.take(6)}…${fp.takeLast(4)}" else fp
 
 private fun createTabWebView(context: Context, tab: TabState): WebView {
     val webView = WebView(context)

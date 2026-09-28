@@ -32,6 +32,14 @@ through it before anything loads.
   doesn't set up yet) — pasting one shows a warning and that line is
   skipped rather than silently failing. Saving restarts Tor with the new
   config.
+- **Circuit viewer**: the layers icon in the toolbar opens a sheet showing the
+  current circuit — This device → Guard → Middle → Exit → Destination — as a
+  nested-ring "onion layer" path. Backed by `TorManager.getCurrentCircuit()`,
+  which asks the control port for `GETINFO circuit-status` (the most
+  recently built `PURPOSE=GENERAL` circuit) and `GETINFO ns/id/<fingerprint>`
+  per hop for its IP. Since this app doesn't do Tor Browser's per-site
+  circuit isolation, this shows *a* current circuit, not necessarily the one
+  that carried whatever page is currently on screen.
 
 ## Known limitations — read before relying on this for real anonymity
 
