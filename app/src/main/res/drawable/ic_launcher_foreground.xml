@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- Stylized onion-layer rings, evoking Tor's layered routing. -->
+    <path
+        android:pathData="M54,20 A34,34 0 1,1 53.9,20 Z"
+        android:strokeColor="#FFFFFF"
+        android:strokeWidth="4"
+        android:fillColor="#00000000" />
+    <path
+        android:pathData="M54,34 A20,20 0 1,1 53.9,34 Z"
+        android:strokeColor="#FFFFFF"
+        android:strokeWidth="4"
+        android:fillColor="#00000000" />
+    <path
+        android:pathData="M54,48 A6,6 0 1,1 53.9,48 Z"
+        android:fillColor="#FFFFFF" />
+</vector>

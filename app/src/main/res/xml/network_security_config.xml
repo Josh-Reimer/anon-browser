@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  WebView traffic here is always routed through Tor's local SOCKS5 proxy (see
+  ProxyController usage in MainActivity), so "cleartext" HTTP requests never touch the
+  network directly — they're wrapped inside the encrypted Tor circuit like any other
+  proxied request. Many onion services are HTTP-only, so cleartext must stay allowed or
+  the browser couldn't reach them at all.
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="true">
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+    </base-config>
+</network-security-config>
