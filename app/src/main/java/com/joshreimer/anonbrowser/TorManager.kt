@@ -29,10 +29,13 @@ data class CircuitHop(
     val role: String,
     val nickname: String,
     val fingerprint: String,
-    val ipAddress: String?
+    val ipAddress: String?,
+    val countryCode: String?
 )
 
-data class CircuitInfo(val circuitId: String, val hops: List<CircuitHop>)
+/** [isOnionCircuit] is true when this is the rendezvous circuit used to reach a .onion
+ * address — those never have an exit relay, since the destination never leaves Tor. */
+data class CircuitInfo(val circuitId: String, val hops: List<CircuitHop>, val isOnionCircuit: Boolean)
 
 /**
  * Launches the bundled tor binary (libtor.so, from the tor-android dependency) as a child
@@ -68,6 +71,7 @@ class TorManager(private val context: Context) {
     private val torrcFile: File get() = File(context.filesDir, "torrc")
     private val cookieFile: File get() = File(dataDir, "control_auth_cookie")
     private val iptStateDir: File get() = File(context.filesDir, "ipt")
+    private val geoIpFile: File get() = File(context.filesDir, "geoip")
 
     private var iptController: Controller? = null
 
@@ -95,7 +99,16 @@ class TorManager(private val context: Context) {
             return
         }
 
-        writeTorrc(bridgeTorrcLines)
+        // Non-fatal: without this, relay country lookups (GETINFO ip-to-country) just come
+        // back empty and the circuit viewer shows no flags.
+        val geoIpLine = try {
+            listOf("GeoIPFile ${ensureGeoIpFile().absolutePath}")
+        } catch (t: Throwable) {
+            Log.w(TAG, "failed to extract geoip database; country lookups will be unavailable", t)
+            emptyList()
+        }
+
+        writeTorrc(bridgeTorrcLines + geoIpLine)
 
         scope.launch {
             try {
@@ -155,10 +168,13 @@ class TorManager(private val context: Context) {
             input.readLine()?.startsWith("250") == true
         } ?: false
 
-    /** Looks up the currently-built general-purpose circuit — the relay path (Guard, Middle,
-     * Exit) that new page loads are routed through — via the control port. Null if Tor isn't
-     * up yet or no circuit has been built. */
-    suspend fun getCurrentCircuit(): CircuitInfo? =
+    /** Looks up the currently-built circuit via the control port — the relay path (Guard,
+     * Middle, Exit) that new page loads are routed through. When [forOnionTarget] is set, looks
+     * for the rendezvous circuit used to reach a .onion address instead: those are also three
+     * hops, but the third is a Rendezvous Point chosen inside the Tor network, not an exit
+     * relay — hidden services never involve an exit node, since the destination never leaves
+     * Tor. Null if Tor isn't up yet or no matching circuit has been built. */
+    suspend fun getCurrentCircuit(forOnionTarget: Boolean = false): CircuitInfo? =
         withControlConnection { input, out ->
             out.write("GETINFO circuit-status\r\n".toByteArray())
             out.flush()
@@ -174,28 +190,43 @@ class TorManager(private val context: Context) {
                 input.readLine() // trailing "250 OK"
             }
 
+            // Tor 0.4.8+ builds Conflux-linked circuit pairs for ordinary web traffic instead
+            // of a single PURPOSE=GENERAL circuit; GENERAL is kept as a fallback for older tor
+            // builds that don't use Conflux.
+            val purposes = if (forOnionTarget) {
+                listOf("PURPOSE=HS_CLIENT_REND")
+            } else {
+                listOf("PURPOSE=CONFLUX_LINKED", "PURPOSE=GENERAL")
+            }
             val chosen = circuitLines
                 .map { it.split(" ") }
                 .filter { parts ->
-                    parts.size >= 3 && parts[1] == "BUILT" && parts.any { p -> p.startsWith("PURPOSE=GENERAL") }
+                    parts.size >= 3 && parts[1] == "BUILT" &&
+                        purposes.any { purpose -> parts.any { p -> p.startsWith(purpose) } }
                 }
                 .lastOrNull() ?: return@withControlConnection null
 
             val circuitId = chosen[0]
-            val roles = listOf("Guard", "Middle", "Exit")
+            val roles = if (forOnionTarget) {
+                listOf("Guard", "Middle", "Rendezvous")
+            } else {
+                listOf("Guard", "Middle", "Exit")
+            }
             val hops = chosen[2].split(",").mapIndexed { index, spec ->
                 val withoutDollar = spec.removePrefix("$")
                 val fingerprint = withoutDollar.substringBefore("~")
                 val nickname = if (withoutDollar.contains("~")) withoutDollar.substringAfter("~") else ""
+                val ip = fetchRelayIp(input, out, fingerprint)
                 CircuitHop(
                     role = roles.getOrElse(index) { "Hop ${index + 1}" },
                     nickname = nickname.ifBlank { "(unknown)" },
                     fingerprint = fingerprint,
-                    ipAddress = fetchRelayIp(input, out, fingerprint)
+                    ipAddress = ip,
+                    countryCode = ip?.let { fetchRelayCountry(input, out, it) }
                 )
             }
 
-            CircuitInfo(circuitId, hops)
+            CircuitInfo(circuitId, hops, isOnionCircuit = forOnionTarget)
         }
 
     /** Looks up a relay's IP from the consensus via the control port. Must be called with an
@@ -223,6 +254,44 @@ class TorManager(private val context: Context) {
             Log.w(TAG, "relay IP lookup failed for $fingerprint", t)
             null
         }
+    }
+
+    /** Looks up an IP's two-letter country code from the GeoIP database ([ensureGeoIpFile])
+     * via the control port. Must be called with an already-authenticated connection (see
+     * [withControlConnection]); sends one more command on the same socket before it's closed.
+     *
+     * A successful single-keyword GETINFO reply is always two lines — "250-key=value" then a
+     * separate "250 OK" — never one ("control_reply_add_done" always appends the OK line
+     * itself, per Tor's control_proto.c). Only a failure (e.g. GeoIP data not loaded) is a
+     * single "551 ..." line. Leaving that trailing "250 OK" unread here would desync the
+     * connection: the next command sent on it (the following hop's ns/id lookup) would read
+     * this leftover line instead of its own reply. */
+    private fun fetchRelayCountry(input: BufferedReader, out: java.io.OutputStream, ip: String): String? {
+        return try {
+            out.write("GETINFO ip-to-country/$ip\r\n".toByteArray())
+            out.flush()
+            val line = input.readLine() ?: return null
+            if (line.startsWith("250-")) {
+                input.readLine() // trailing "250 OK"
+            }
+            if (!line.startsWith("250")) return null
+            line.substringAfter("=", "").trim().uppercase().takeIf { it.length == 2 && it != "??" }
+        } catch (t: Throwable) {
+            Log.w(TAG, "country lookup failed for $ip", t)
+            null
+        }
+    }
+
+    /** Copies the bundled GeoIP database (Tor's own country-range format) out of assets into
+     * app storage the one time it's needed, so it has a real filesystem path to hand to Tor's
+     * GeoIPFile directive — tor can't read straight out of the APK. */
+    private fun ensureGeoIpFile(): File {
+        if (!geoIpFile.exists()) {
+            context.assets.open("geoip").use { input ->
+                geoIpFile.outputStream().use { output -> input.copyTo(output) }
+            }
+        }
+        return geoIpFile
     }
 
     /** Opens an authenticated control-port connection, runs [block] on it, then closes it. */

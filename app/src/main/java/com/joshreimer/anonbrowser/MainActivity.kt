@@ -172,7 +172,9 @@ class MainActivity : ComponentActivity() {
                         onApplyBridgeSettings = { enabled, text ->
                             torService?.applyBridgeSettings(enabled, text)
                         },
-                        onFetchCircuit = { torService?.torManager?.getCurrentCircuit() }
+                        onFetchCircuit = { forOnionTarget ->
+                            torService?.torManager?.getCurrentCircuit(forOnionTarget)
+                        }
                     )
                 }
             }
@@ -205,7 +207,7 @@ private fun BrowserScreen(
     bridgeWarningFlow: StateFlow<String?>,
     onNewIdentity: suspend () -> Boolean,
     onApplyBridgeSettings: (enabled: Boolean, text: String) -> Unit,
-    onFetchCircuit: suspend () -> CircuitInfo?
+    onFetchCircuit: suspend (forOnionTarget: Boolean) -> CircuitInfo?
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -305,8 +307,68 @@ private fun BrowserScreen(
                 onNewTab = ::addNewTab
             )
 
+            Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 4.dp)) {
+                TextField(
+                    value = addressBarText,
+                    onValueChange = { addressBarText = it },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .focusRequester(focusRequester)
+                        .onFocusChanged { focusState ->
+                            if (focusState.isFocused && !isEditingAddress) {
+                                isEditingAddress = true
+                                previousAddress = addressBarText
+                                addressBarText = ""
+                            } else if (!focusState.isFocused && isEditingAddress) {
+                                isEditingAddress = false
+                                if (addressBarText.isBlank()) {
+                                    addressBarText = previousAddress
+                                }
+                            }
+                        },
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri, imeAction = ImeAction.Go),
+                    keyboardActions = KeyboardActions(
+                        onGo = {
+                            if (proxyReady && addressBarText.isNotBlank()) {
+                                activeTab.webView?.loadUrl(normalizeUrl(addressBarText))
+                            }
+                            isEditingAddress = false
+                            focusManager.clearFocus()
+                            keyboardController?.hide()
+                        }
+                    )
+                )
+
+                if (isEditingAddress && previousAddress.isNotBlank()) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth().padding(start = 8.dp, top = 2.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = previousAddress,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            style = MaterialTheme.typography.bodySmall,
+                            modifier = Modifier.weight(1f)
+                        )
+                        IconButton(onClick = {
+                            addressBarText = previousAddress
+                            focusRequester.requestFocus()
+                        }) {
+                            Icon(Icons.Filled.Edit, contentDescription = "Edit previous address")
+                        }
+                        IconButton(onClick = {
+                            clipboardManager.setText(AnnotatedString(previousAddress))
+                        }) {
+                            Icon(Icons.Filled.ContentCopy, contentDescription = "Copy previous address")
+                        }
+                    }
+                }
+            }
+
             Row(
-                modifier = Modifier.fillMaxWidth().padding(4.dp),
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 IconButton(onClick = { activeTab.webView?.goBack() }, enabled = activeTab.canGoBack) {
@@ -319,65 +381,7 @@ private fun BrowserScreen(
                     Icon(Icons.Filled.Refresh, contentDescription = "Reload")
                 }
 
-                Column(modifier = Modifier.weight(1f)) {
-                    TextField(
-                        value = addressBarText,
-                        onValueChange = { addressBarText = it },
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .focusRequester(focusRequester)
-                            .onFocusChanged { focusState ->
-                                if (focusState.isFocused && !isEditingAddress) {
-                                    isEditingAddress = true
-                                    previousAddress = addressBarText
-                                    addressBarText = ""
-                                } else if (!focusState.isFocused && isEditingAddress) {
-                                    isEditingAddress = false
-                                    if (addressBarText.isBlank()) {
-                                        addressBarText = previousAddress
-                                    }
-                                }
-                            },
-                        singleLine = true,
-                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri, imeAction = ImeAction.Go),
-                        keyboardActions = KeyboardActions(
-                            onGo = {
-                                if (proxyReady && addressBarText.isNotBlank()) {
-                                    activeTab.webView?.loadUrl(normalizeUrl(addressBarText))
-                                }
-                                isEditingAddress = false
-                                focusManager.clearFocus()
-                                keyboardController?.hide()
-                            }
-                        )
-                    )
-
-                    if (isEditingAddress && previousAddress.isNotBlank()) {
-                        Row(
-                            modifier = Modifier.fillMaxWidth().padding(start = 8.dp, top = 2.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Text(
-                                text = previousAddress,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                                style = MaterialTheme.typography.bodySmall,
-                                modifier = Modifier.weight(1f)
-                            )
-                            IconButton(onClick = {
-                                addressBarText = previousAddress
-                                focusRequester.requestFocus()
-                            }) {
-                                Icon(Icons.Filled.Edit, contentDescription = "Edit previous address")
-                            }
-                            IconButton(onClick = {
-                                clipboardManager.setText(AnnotatedString(previousAddress))
-                            }) {
-                                Icon(Icons.Filled.ContentCopy, contentDescription = "Copy previous address")
-                            }
-                        }
-                    }
-                }
+                Spacer(Modifier.weight(1f))
 
                 IconButton(
                     onClick = {
@@ -479,7 +483,7 @@ private fun BrowserScreen(
 
         if (showCircuitSheet) {
             CircuitSheet(
-                onFetch = onFetchCircuit,
+                onFetch = { onFetchCircuit(isOnionAddress(activeTab.url)) },
                 onDismiss = { showCircuitSheet = false }
             )
         }
@@ -723,14 +727,20 @@ private fun CircuitSheet(
                     Icon(Icons.Filled.Refresh, contentDescription = "Refresh circuit")
                 }
             }
+            val snapshot = circuit
             Text(
-                "Your traffic is routed through three relays, each only knowing the hop " +
-                    "before and after it — like layers of an onion.",
+                if (snapshot?.isOnionCircuit == true) {
+                    "Hidden services are reached entirely inside the Tor network via a " +
+                        "rendezvous point — there's no exit relay, because the destination " +
+                        "never touches the public internet."
+                } else {
+                    "Your traffic is routed through three relays, each only knowing the hop " +
+                        "before and after it — like layers of an onion."
+                },
                 style = MaterialTheme.typography.bodySmall
             )
             Spacer(Modifier.height(16.dp))
 
-            val snapshot = circuit
             when {
                 loading -> {
                     Box(modifier = Modifier.fillMaxWidth().padding(32.dp), contentAlignment = Alignment.Center) {
@@ -749,20 +759,33 @@ private fun CircuitSheet(
                         snapshot.hops.forEachIndexed { index, hop ->
                             CircuitHopRow(
                                 label = "${hop.role} · ${hop.nickname}",
-                                subtitle = listOfNotNull(hop.ipAddress, shortenFingerprint(hop.fingerprint))
-                                    .joinToString("  ·  "),
+                                subtitle = listOfNotNull(
+                                    countryLabel(hop.countryCode),
+                                    hop.ipAddress,
+                                    shortenFingerprint(hop.fingerprint)
+                                ).joinToString("  ·  "),
                                 ringCount = index + 2,
                                 isFirst = false,
                                 isLast = false
                             )
                         }
-                        CircuitHopRow(
-                            label = "Destination site",
-                            subtitle = "Only the exit relay knows this",
-                            ringCount = snapshot.hops.size + 2,
-                            isFirst = false,
-                            isLast = true
-                        )
+                        if (snapshot.isOnionCircuit) {
+                            CircuitHopRow(
+                                label = "Hidden service",
+                                subtitle = "No exit relay — reached inside Tor via the rendezvous point above",
+                                ringCount = snapshot.hops.size + 2,
+                                isFirst = false,
+                                isLast = true
+                            )
+                        } else {
+                            CircuitHopRow(
+                                label = "Destination site",
+                                subtitle = "Only the exit relay knows this",
+                                ringCount = snapshot.hops.size + 2,
+                                isFirst = false,
+                                isLast = true
+                            )
+                        }
                     }
                 }
             }
@@ -816,6 +839,24 @@ private fun CircuitHopRow(
 
 private fun shortenFingerprint(fp: String): String =
     if (fp.length > 12) "${fp.take(6)}…${fp.takeLast(4)}" else fp
+
+private fun isOnionAddress(url: String): Boolean =
+    android.net.Uri.parse(url).host?.endsWith(".onion") == true
+
+/** Regional-indicator flag emoji + display name for an ISO 3166-1 alpha-2 country code, e.g.
+ * "DE" -> "🇩🇪 Germany". Each regional-indicator symbol sits [FLAG_EMOJI_BASE] above its
+ * letter's position in the alphabet, so "DE" becomes the pair of symbols at D and E. */
+private fun countryLabel(countryCode: String?): String? {
+    if (countryCode == null || countryCode.length != 2) return null
+    val upper = countryCode.uppercase()
+    if (upper.any { it !in 'A'..'Z' }) return null
+    val flag = upper.map { letter -> String(Character.toChars(FLAG_EMOJI_BASE + (letter - 'A'))) }
+        .joinToString("")
+    val name = java.util.Locale("", upper).displayCountry.takeIf { it.isNotBlank() } ?: upper
+    return "$flag $name"
+}
+
+private const val FLAG_EMOJI_BASE = 0x1F1E6 // regional indicator symbol letter 'A'
 
 private fun createTabWebView(context: Context, tab: TabState): WebView {
     val webView = WebView(context)

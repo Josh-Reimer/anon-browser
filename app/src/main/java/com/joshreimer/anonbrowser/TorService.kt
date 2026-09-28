@@ -54,6 +54,19 @@ class TorService : LifecycleService() {
         return binder
     }
 
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        if (intent?.action == ACTION_QUIT) {
+            torManager.stop()
+            stopForeground(STOP_FOREGROUND_REMOVE)
+            stopSelf()
+            // A browser meant for anonymity shouldn't leave WebView/process state lingering
+            // after the user asks to quit — kill the whole app, not just this service.
+            android.os.Process.killProcess(android.os.Process.myPid())
+            return START_NOT_STICKY
+        }
+        return super.onStartCommand(intent, flags, startId)
+    }
+
     override fun onDestroy() {
         torManager.stop()
         super.onDestroy()
@@ -89,11 +102,17 @@ class TorService : LifecycleService() {
             Intent(this, MainActivity::class.java),
             PendingIntent.FLAG_IMMUTABLE
         )
+        val quitIntent = PendingIntent.getService(
+            this, 0,
+            Intent(this, TorService::class.java).setAction(ACTION_QUIT),
+            PendingIntent.FLAG_IMMUTABLE
+        )
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle("Anon Browser")
             .setContentText(text)
             .setSmallIcon(android.R.drawable.ic_lock_lock)
             .setContentIntent(pendingIntent)
+            .addAction(android.R.drawable.ic_menu_close_clear_cancel, "Quit", quitIntent)
             .setOngoing(true)
             .setPriority(NotificationCompat.PRIORITY_LOW)
             .build()
@@ -102,5 +121,6 @@ class TorService : LifecycleService() {
     companion object {
         private const val CHANNEL_ID = "tor_status"
         private const val NOTIFICATION_ID = 1
+        private const val ACTION_QUIT = "com.joshreimer.anonbrowser.action.QUIT"
     }
 }
