@@ -45,6 +45,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBars
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.windowInsetsTopHeight
 import androidx.compose.foundation.layout.systemBarsPadding
@@ -60,15 +61,22 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Shuffle
+import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextField
+import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -86,6 +94,7 @@ import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.AnnotatedString
@@ -113,6 +122,7 @@ class MainActivity : ComponentActivity() {
     // collectAsState on one stable flow — never conditionally on whether the service is
     // bound yet, which would make Compose call different composables across recompositions.
     private val torStateFlow = MutableStateFlow<TorState>(TorState.Stopped)
+    private val bridgeWarningFlow = MutableStateFlow<String?>(null)
     private var torService: TorService? = null
 
     private val connection = object : ServiceConnection {
@@ -121,6 +131,9 @@ class MainActivity : ComponentActivity() {
             torService = service
             lifecycleScope.launch {
                 service.torManager.state.collect { torStateFlow.value = it }
+            }
+            lifecycleScope.launch {
+                service.torManager.bridgeWarning.collect { bridgeWarningFlow.value = it }
             }
         }
 
@@ -152,7 +165,11 @@ class MainActivity : ComponentActivity() {
                 Surface {
                     BrowserScreen(
                         torStateFlow = torStateFlow,
-                        onNewIdentity = { torService?.torManager?.newIdentity() ?: false }
+                        bridgeWarningFlow = bridgeWarningFlow,
+                        onNewIdentity = { torService?.torManager?.newIdentity() ?: false },
+                        onApplyBridgeSettings = { enabled, text ->
+                            torService?.applyBridgeSettings(enabled, text)
+                        }
                     )
                 }
             }
@@ -182,14 +199,19 @@ private class TabState(val id: Long, initialUrl: String = "") {
 @Composable
 private fun BrowserScreen(
     torStateFlow: StateFlow<TorState>,
-    onNewIdentity: suspend () -> Boolean
+    bridgeWarningFlow: StateFlow<String?>,
+    onNewIdentity: suspend () -> Boolean,
+    onApplyBridgeSettings: (enabled: Boolean, text: String) -> Unit
 ) {
+    val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val torState by torStateFlow.collectAsState()
+    val bridgeWarning by bridgeWarningFlow.collectAsState()
     val focusManager = LocalFocusManager.current
     val keyboardController = LocalSoftwareKeyboardController.current
     val clipboardManager = LocalClipboardManager.current
     val focusRequester = remember { FocusRequester() }
+    var showBridgesSheet by remember { mutableStateOf(false) }
 
     var proxyReady by remember { mutableStateOf(false) }
     var addressBarText by remember { mutableStateOf("") }
@@ -362,9 +384,23 @@ private fun BrowserScreen(
                 ) {
                     Icon(Icons.Filled.Shuffle, contentDescription = "New identity")
                 }
+
+                IconButton(onClick = { showBridgesSheet = true }) {
+                    Icon(Icons.Filled.Settings, contentDescription = "Bridge settings")
+                }
             }
 
             TorStatusBar(torState, proxyReady)
+
+            if (bridgeWarning != null) {
+                Row(modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp)) {
+                    Text(
+                        text = bridgeWarning ?: "",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.error
+                    )
+                }
+            }
 
             if (proxyReady && activeTab.loadProgress in 1..99) {
                 LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
@@ -418,6 +454,15 @@ private fun BrowserScreen(
                     )
                 }
             }
+        }
+
+        if (showBridgesSheet) {
+            BridgesSheet(
+                initialEnabled = remember { BridgePrefs.isEnabled(context) },
+                initialText = remember { BridgePrefs.getText(context) },
+                onDismiss = { showBridgesSheet = false },
+                onSave = { enabled, text -> onApplyBridgeSettings(enabled, text) }
+            )
         }
     }
 }
@@ -575,6 +620,57 @@ private fun TorConnectingOverlay(state: TorState, modifier: Modifier = Modifier)
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.error
             )
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun BridgesSheet(
+    initialEnabled: Boolean,
+    initialText: String,
+    onDismiss: () -> Unit,
+    onSave: (enabled: Boolean, text: String) -> Unit
+) {
+    var enabled by remember { mutableStateOf(initialEnabled) }
+    var text by remember { mutableStateOf(initialText) }
+    val sheetState = rememberModalBottomSheetState()
+
+    ModalBottomSheet(onDismissRequest = onDismiss, sheetState = sheetState) {
+        Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 8.dp)) {
+            Text("Tor Bridges", style = MaterialTheme.typography.titleLarge)
+            Spacer(Modifier.height(8.dp))
+            Text(
+                "If Tor is blocked on your network, get bridge lines from bridges.torproject.org " +
+                    "and paste them below, one per line. obfs4 and webtunnel bridges are supported; " +
+                    "snowflake isn't yet.",
+                style = MaterialTheme.typography.bodySmall
+            )
+            Spacer(Modifier.height(16.dp))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Switch(checked = enabled, onCheckedChange = { enabled = it })
+                Spacer(Modifier.width(8.dp))
+                Text("Use bridges")
+            }
+            Spacer(Modifier.height(12.dp))
+            OutlinedTextField(
+                value = text,
+                onValueChange = { text = it },
+                modifier = Modifier.fillMaxWidth().height(160.dp),
+                enabled = enabled,
+                placeholder = { Text("obfs4 192.0.2.1:443 FINGERPRINT cert=... iat-mode=0") }
+            )
+            Spacer(Modifier.height(16.dp))
+            Button(
+                onClick = {
+                    onSave(enabled, text)
+                    onDismiss()
+                },
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Text("Save and reconnect")
+            }
+            Spacer(Modifier.height(12.dp))
         }
     }
 }

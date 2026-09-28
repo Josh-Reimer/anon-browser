@@ -34,7 +34,7 @@ class TorService : LifecycleService() {
         torManager = TorManager(applicationContext)
         createNotificationChannel()
         startForeground(NOTIFICATION_ID, buildNotification("Starting Tor…"))
-        torManager.start()
+        torManager.start(BridgePrefs.getActiveLines(applicationContext))
 
         lifecycleScope.launch {
             torManager.state.collect { state ->
@@ -57,6 +57,19 @@ class TorService : LifecycleService() {
     override fun onDestroy() {
         torManager.stop()
         super.onDestroy()
+    }
+
+    /** Persists the new bridge config and restarts tor with it applied. */
+    fun applyBridgeSettings(enabled: Boolean, rawText: String) {
+        BridgePrefs.save(applicationContext, enabled, rawText)
+        val lines = if (enabled) {
+            rawText.lines().map { it.trim() }.filter { it.isNotEmpty() }
+        } else {
+            emptyList()
+        }
+        lifecycleScope.launch {
+            torManager.restart(lines)
+        }
     }
 
     private fun createNotificationChannel() {

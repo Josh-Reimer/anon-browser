@@ -72,6 +72,10 @@ dependencies {
     // executable under Android 10+'s W^X restrictions).
     implementation("info.guardianproject:tor-android:0.4.8.16")
 
+    // Pluggable transports (obfs4/webtunnel/meek_lite) for Tor bridges — the same library
+    // Orbot uses. Snowflake/dnstt are also in here but aren't wired up (see Bridges.kt).
+    implementation("com.netzarchitekten:IPtProxy:5.5.1")
+
     testImplementation("junit:junit:4.13.2")
 
     androidTestImplementation("androidx.test.ext:junit:1.2.1")

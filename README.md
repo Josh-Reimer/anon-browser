@@ -21,6 +21,17 @@ through it before anything loads.
   complete — the UI blocks page loads until then, so nothing goes out
   unproxied. Chromium's SOCKS5 client resolves DNS through the proxy itself
   (no local DNS leak).
+- **Bridges**: tap the settings icon in the toolbar to paste bridge lines
+  from bridges.torproject.org (`Bridges.kt`, `BridgesSheet` in
+  `MainActivity.kt`). Plain (unlisted) bridges and `obfs4`/`webtunnel`/
+  `meek_lite` bridges work — the pluggable-transport ones run through
+  `com.netzarchitekten:IPtProxy` (the same library Orbot uses), which starts
+  a local SOCKS listener per transport that `TorManager` points torrc's
+  `ClientTransportPlugin` at. Snowflake and dnstt bridges are recognized but
+  not started (they need extra broker/ICE or resolver config this app
+  doesn't set up yet) — pasting one shows a warning and that line is
+  skipped rather than silently failing. Saving restarts Tor with the new
+  config.
 
 ## Known limitations — read before relying on this for real anonymity
 
