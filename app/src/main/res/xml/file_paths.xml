@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<paths>
+    <!-- Where the Self-Modify build script leaves the freshly-built debug APK — see
+         SelfModify.kt's installBuiltApk(). The container this repo lives in bind-mounts
+         /root/coding to the device's /sdcard/coding, so this is the same file either way. -->
+    <external-path name="apk" path="coding/anon-browser/app/build/outputs/apk/debug/" />
+</paths>

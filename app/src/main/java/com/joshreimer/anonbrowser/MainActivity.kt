@@ -7,7 +7,9 @@ import android.content.Intent
 import android.content.ServiceConnection
 import android.os.Build
 import android.os.Bundle
+import android.os.Environment
 import android.os.IBinder
+import android.provider.Settings
 import android.view.View
 import android.view.ViewGroup
 import android.webkit.CookieManager
@@ -54,10 +56,12 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.ArrowForward
+import androidx.compose.material.icons.filled.AutoFixHigh
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Edit
@@ -77,6 +81,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TextField
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
@@ -104,9 +109,11 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
+import androidx.core.content.FileProvider
 import androidx.lifecycle.lifecycleScope
 import androidx.webkit.ProxyConfig
 import androidx.webkit.ProxyController
@@ -116,6 +123,7 @@ import com.joshreimer.anonbrowser.ui.theme.TorPurple
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
+import java.io.File
 import kotlin.math.roundToInt
 
 class MainActivity : ComponentActivity() {
@@ -147,6 +155,11 @@ class MainActivity : ComponentActivity() {
     private val notificationPermissionLauncher =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { /* no-op either way */ }
 
+    // Termux's RUN_COMMAND is a "dangerous" permission Termux itself declares — needed for the
+    // Self-Modify feature to hand a change request to Claude running in the user's Termux setup.
+    private val runCommandPermissionLauncher =
+        registerForActivityResult(ActivityResultContracts.RequestPermission()) { /* no-op either way */ }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
@@ -157,6 +170,11 @@ class MainActivity : ComponentActivity() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             notificationPermissionLauncher.launch(android.Manifest.permission.POST_NOTIFICATIONS)
         }
+        runCommandPermissionLauncher.launch("com.termux.permission.RUN_COMMAND")
+
+        // Picks up a Self-Modify result that was delivered by SelfModifyResultReceiver while
+        // this process was dead (a background Termux build can easily outlive it).
+        SelfModifyStore.hydrate(applicationContext)
 
         val serviceIntent = Intent(this, TorService::class.java)
         ContextCompat.startForegroundService(this, serviceIntent)
@@ -219,6 +237,8 @@ private fun BrowserScreen(
     val focusRequester = remember { FocusRequester() }
     var showBridgesSheet by remember { mutableStateOf(false) }
     var showCircuitSheet by remember { mutableStateOf(false) }
+    var showSelfModifySheet by remember { mutableStateOf(false) }
+    val selfModifyState by SelfModifyStore.state.collectAsState()
 
     var proxyReady by remember { mutableStateOf(false) }
     var addressBarText by remember { mutableStateOf("") }
@@ -404,6 +424,10 @@ private fun BrowserScreen(
                 IconButton(onClick = { showBridgesSheet = true }) {
                     Icon(Icons.Filled.Settings, contentDescription = "Bridge settings")
                 }
+
+                IconButton(onClick = { showSelfModifySheet = true }) {
+                    Icon(Icons.Filled.AutoFixHigh, contentDescription = "Self-modify")
+                }
             }
 
             TorStatusBar(torState, proxyReady)
@@ -485,6 +509,20 @@ private fun BrowserScreen(
             CircuitSheet(
                 onFetch = { onFetchCircuit(isOnionAddress(activeTab.url)) },
                 onDismiss = { showCircuitSheet = false }
+            )
+        }
+
+        if (showSelfModifySheet) {
+            SelfModifySheet(
+                state = selfModifyState,
+                onSubmit = { prompt ->
+                    val launched = launchSelfModify(context, prompt)
+                    if (launched) SelfModifyStore.markRunning(context, prompt)
+                    launched
+                },
+                onInstall = { installBuiltApk(context) },
+                onReset = { SelfModifyStore.reset(context) },
+                onDismiss = { showSelfModifySheet = false }
             )
         }
     }
@@ -794,6 +832,147 @@ private fun CircuitSheet(
     }
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun SelfModifySheet(
+    state: SelfModifyState,
+    onSubmit: (String) -> Boolean,
+    onInstall: () -> Unit,
+    onReset: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    val context = LocalContext.current
+    val sheetState = rememberModalBottomSheetState()
+    var prompt by remember { mutableStateOf("") }
+    var launchFailed by remember { mutableStateOf(false) }
+
+    ModalBottomSheet(onDismissRequest = onDismiss, sheetState = sheetState) {
+        Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 8.dp)) {
+            Text("Self-Modify", style = MaterialTheme.typography.titleLarge)
+            Spacer(Modifier.height(8.dp))
+            Text(
+                "Describe a change. Claude edits this app's own source in your Termux setup " +
+                    "and rebuilds it — unattended, with full file and shell access on this " +
+                    "device, so only ask for changes you'd trust yourself to make.",
+                style = MaterialTheme.typography.bodySmall
+            )
+            Spacer(Modifier.height(16.dp))
+
+            when (state) {
+                is SelfModifyState.Idle -> {
+                    OutlinedTextField(
+                        value = prompt,
+                        onValueChange = {
+                            prompt = it
+                            launchFailed = false
+                        },
+                        modifier = Modifier.fillMaxWidth().height(120.dp),
+                        placeholder = { Text("e.g. \"make the tab strip taller\"") }
+                    )
+                    if (launchFailed) {
+                        Spacer(Modifier.height(8.dp))
+                        Text(
+                            "Couldn't reach Termux. Make sure Termux is installed, that this " +
+                                "app has been granted the RUN_COMMAND permission (Settings → " +
+                                "Apps → Anon Browser → Permissions), and that " +
+                                "~/.termux/termux.properties has allow-external-apps=true " +
+                                "(then run termux-reload-settings).",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.error
+                        )
+                    }
+                    if (!hasAllFilesAccess()) {
+                        Spacer(Modifier.height(8.dp))
+                        Text(
+                            "Also needs \"All files access\" to read back the finished build.",
+                            style = MaterialTheme.typography.bodySmall
+                        )
+                        TextButton(onClick = { requestAllFilesAccess(context) }) {
+                            Text("Grant file access")
+                        }
+                    }
+                    Spacer(Modifier.height(16.dp))
+                    Button(
+                        onClick = { launchFailed = !onSubmit(prompt) },
+                        modifier = Modifier.fillMaxWidth(),
+                        enabled = prompt.isNotBlank()
+                    ) {
+                        Text("Build & Install")
+                    }
+                }
+
+                is SelfModifyState.Running -> {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(20.dp),
+                            strokeWidth = 2.dp,
+                            color = TorPurple
+                        )
+                        Spacer(Modifier.width(12.dp))
+                        Text("Editing and rebuilding…", style = MaterialTheme.typography.bodyMedium)
+                    }
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        "\"${state.prompt}\"",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Spacer(Modifier.height(16.dp))
+                    TextButton(onClick = onReset) {
+                        Text("Reset (doesn't stop the build already running in Termux)")
+                    }
+                }
+
+                is SelfModifyState.Success -> {
+                    Text("Build succeeded.", style = MaterialTheme.typography.titleMedium)
+                    Spacer(Modifier.height(8.dp))
+                    LogView(state.logTail)
+                    Spacer(Modifier.height(16.dp))
+                    Button(onClick = onInstall, modifier = Modifier.fillMaxWidth()) {
+                        Text("Install now")
+                    }
+                    Spacer(Modifier.height(8.dp))
+                    TextButton(onClick = onReset) {
+                        Text("Make another change")
+                    }
+                }
+
+                is SelfModifyState.Failed -> {
+                    Text(
+                        "Build failed (exit code ${state.exitCode}).",
+                        style = MaterialTheme.typography.titleMedium,
+                        color = MaterialTheme.colorScheme.error
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    LogView(state.logTail)
+                    Spacer(Modifier.height(16.dp))
+                    TextButton(onClick = onReset) {
+                        Text("Try again")
+                    }
+                }
+            }
+            Spacer(Modifier.height(12.dp))
+        }
+    }
+}
+
+@Composable
+private fun LogView(text: String) {
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(200.dp)
+            .background(MaterialTheme.colorScheme.surfaceVariant)
+            .verticalScroll(rememberScrollState())
+            .padding(8.dp)
+    ) {
+        Text(
+            text = text.ifBlank { "(no output captured)" },
+            style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace)
+        )
+    }
+}
+
 @Composable
 private fun CircuitHopRow(
     label: String,
@@ -857,6 +1036,34 @@ private fun countryLabel(countryCode: String?): String? {
 }
 
 private const val FLAG_EMOJI_BASE = 0x1F1E6 // regional indicator symbol letter 'A'
+
+/** True on API < 30 (no such restriction existed yet) or once the user has granted "All files
+ * access" — needed to read [SELF_MODIFY_APK_PATH] back for the FileProvider install handoff,
+ * since it's an arbitrary shared-storage path rather than this app's own external-files dir. */
+private fun hasAllFilesAccess(): Boolean =
+    Build.VERSION.SDK_INT < Build.VERSION_CODES.R || Environment.isExternalStorageManager()
+
+private fun requestAllFilesAccess(context: Context) {
+    val intent = Intent(
+        Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION,
+        android.net.Uri.fromParts("package", context.packageName, null)
+    )
+    context.startActivity(intent)
+}
+
+/** Prompts installing the APK the Self-Modify build produced, over this running app — the
+ * standard FileProvider + ACTION_VIEW flow. Relies on that APK being signed with the same
+ * debug keystore as whatever's currently installed; if that keystore ever gets regenerated,
+ * this will fail with a signature mismatch until a manual uninstall. */
+private fun installBuiltApk(context: Context) {
+    val apkFile = File(SELF_MODIFY_APK_PATH)
+    val uri = FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", apkFile)
+    val intent = Intent(Intent.ACTION_VIEW).apply {
+        setDataAndType(uri, "application/vnd.android.package-archive")
+        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
+    }
+    context.startActivity(intent)
+}
 
 private fun createTabWebView(context: Context, tab: TabState): WebView {
     val webView = WebView(context)
