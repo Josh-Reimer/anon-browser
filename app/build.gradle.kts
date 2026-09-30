@@ -65,6 +65,10 @@ dependencies {
     implementation("androidx.compose.material3:material3")
     implementation("androidx.compose.material:material-icons-extended")
 
+    // Pinned above what Compose 2024.09.02 pulls in transitively (1.0.1) — 1.1.0 is built
+    // 16KB-page-aligned, 1.0.1 isn't (flagged by Android's debug-build compatibility warning).
+    implementation("androidx.graphics:graphics-path:1.1.0")
+
     // Chromium WebView proxy control (routes all WebView traffic through Tor's SOCKS5 port).
     implementation("androidx.webkit:webkit:1.17.1")
 

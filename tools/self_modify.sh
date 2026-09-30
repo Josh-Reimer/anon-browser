@@ -14,5 +14,13 @@
 # the actual toolchain (JDK, Android SDK, Gradle caches, and the `claude`
 # CLI) lives; the real work happens in self_modify_inner.sh, invoked the
 # same explicit-interpreter way for the same reason.
+#
+# A bare `proot-distro login` does NOT automatically bind /sdcard/coding to
+# /root/coding inside the container the way this project's own dev sandbox
+# does (that bind is specific to how this sandbox itself was launched) — it
+# has to be requested explicitly with -b, or the container can't see this
+# repo at all ("No such file or directory" for a path that very much exists,
+# just not inside a freshly-logged-in container's view).
 set -euo pipefail
-exec proot-distro login debian -- bash /root/coding/anon-browser/tools/self_modify_inner.sh "$1"
+exec proot-distro login debian -b /storage/emulated/0/coding:/root/coding -- \
+    bash /root/coding/anon-browser/tools/self_modify_inner.sh "$1"
