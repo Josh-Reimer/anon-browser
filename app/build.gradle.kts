@@ -1,7 +1,21 @@
+import java.util.Properties
+
 plugins {
     id("com.android.application") version "8.6.1"
     id("org.jetbrains.kotlin.android") version "2.0.21"
     id("org.jetbrains.kotlin.plugin.compose") version "2.0.21"
+}
+
+// Release signing lives outside the repo (path set via ANON_BROWSER_KEYSTORE_PROPERTIES,
+// defaulting to a sibling directory) so the keystore/passwords never end up in git.
+val keystorePropertiesFile = file(
+    providers.environmentVariable("ANON_BROWSER_KEYSTORE_PROPERTIES")
+        .getOrElse("../../anon-browser-keys/keystore.properties")
+)
+val keystoreProperties = Properties().apply {
+    if (keystorePropertiesFile.exists()) {
+        keystorePropertiesFile.inputStream().use { load(it) }
+    }
 }
 
 android {
@@ -18,10 +32,24 @@ android {
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
+    signingConfigs {
+        if (keystorePropertiesFile.exists()) {
+            create("release") {
+                storeFile = file(keystoreProperties.getProperty("storeFile"))
+                storePassword = keystoreProperties.getProperty("storePassword")
+                keyAlias = keystoreProperties.getProperty("keyAlias")
+                keyPassword = keystoreProperties.getProperty("keyPassword")
+            }
+        }
+    }
+
     buildTypes {
         release {
             isMinifyEnabled = false
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
+            if (keystorePropertiesFile.exists()) {
+                signingConfig = signingConfigs.getByName("release")
+            }
         }
     }
 
