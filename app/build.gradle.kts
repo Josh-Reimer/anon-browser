@@ -102,7 +102,17 @@ dependencies {
 
     // Bundled tor daemon binary (libtor.so per ABI, placed under nativeLibraryDir so it's
     // executable under Android 10+'s W^X restrictions).
-    implementation("info.guardianproject:tor-android:0.4.8.16")
+    // 0.4.8.22 (same Tor 0.4.8.x stable series as before, just a later build) is the first
+    // version built with NDK r27+ defaults, giving a 16KB-page-aligned libtor.so; 0.4.8.16's
+    // was 4KB-aligned and failed Android's 16KB-page compatibility check.
+    implementation("info.guardianproject:tor-android:0.4.8.22")
+    // tor-android 0.4.8.22 newly declares kotlin-stdlib:2.3.0, which the project's Kotlin
+    // plugin (2.0.21) can't read ("compiled with an incompatible version of Kotlin"). tor-android
+    // is a thin JNI/binary wrapper with no need for anything stdlib 2.3 added, so force the
+    // resolved stdlib back down to the version our own Kotlin plugin already provides.
+    implementation("org.jetbrains.kotlin:kotlin-stdlib") {
+        version { strictly("2.0.21") }
+    }
 
     // Pluggable transports (obfs4/webtunnel/meek_lite) for Tor bridges — the same library
     // Orbot uses. Snowflake/dnstt are also in here but aren't wired up (see Bridges.kt).

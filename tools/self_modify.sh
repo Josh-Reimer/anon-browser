@@ -21,6 +21,14 @@
 # has to be requested explicitly with -b, or the container can't see this
 # repo at all ("No such file or directory" for a path that very much exists,
 # just not inside a freshly-logged-in container's view).
+#
+# -u coder: proot-distro login defaults to root, which has its own separate
+# $HOME=/root and thus its own separate `claude` credentials at
+# /root/.claude/.credentials.json — found stale (last refreshed months ago,
+# refresh token itself expired: "OAuth session expired and could not be
+# refreshed") because nothing ever runs there interactively. The `coder`
+# user is this project's actual dev-sandbox identity; its credentials at
+# /home/coder/.claude/.credentials.json are the ones kept alive by real use.
 set -euo pipefail
-exec proot-distro login debian -b /storage/emulated/0/coding:/root/coding -- \
+exec proot-distro login debian -u coder -b /storage/emulated/0/coding:/root/coding -- \
     bash /root/coding/anon-browser/tools/self_modify_inner.sh "$1"
