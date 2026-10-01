@@ -11,6 +11,17 @@ set -uo pipefail
 # (proot-distro's default login) unless this is set.
 export IS_SANDBOX=1
 
+# self_modify.sh invokes this script as `proot-distro login ... -- bash ...`.
+# Passing a command after `--` makes proot-distro exec it directly instead of
+# through a login shell, so ~/.bashrc (which normally puts ~/.local/bin, this
+# container's own working `claude` install, ahead of everything else) never
+# runs. Without this, bare `claude` resolves via proot-distro's default PATH
+# to the Termux-side bind-mounted `claude` instead (Termux's Node reports
+# process.platform "android", which no published @anthropic-ai/claude-code
+# platform package matches, so that install is permanently stuck as an
+# unfetched-native-binary stub — "claude native binary not installed").
+export PATH="$HOME/.local/bin:$PATH"
+
 cd /root/coding/anon-browser
 
 echo "=== claude edit pass ==="
