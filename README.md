@@ -98,3 +98,19 @@ this Debian proot) — both the SDK's bundled `platform-tools/adb` (x86_64-only
 ELF, won't run on this aarch64 sandbox, same issue as `aapt2`) and Termux's
 own `adb` (fails to dynamically link when invoked from inside this proot)
 don't work from in here.
+
+## Claude Code skills
+
+[`.claude/skills/`](.claude/skills/) has three skills written from the
+gotchas hit building this project, for reuse by Claude Code in similar
+projects:
+
+- [`android-tor-integration`](.claude/skills/android-tor-integration/SKILL.md) —
+  bundling a real `tor` daemon into an Android app: launching it, driving its
+  control port, proxying WebView through it, pluggable-transport bridges.
+- [`android-termux-build`](.claude/skills/android-termux-build/SKILL.md) —
+  building/signing/installing a Gradle Android project from Termux or a
+  nested proot-distro container.
+- [`shizuku-termux-agents`](.claude/skills/shizuku-termux-agents/SKILL.md) —
+  giving a Termux-based agent privileged access to the real Android OS via
+  Shizuku, plus Termux's `RUN_COMMAND` for the reverse direction.
